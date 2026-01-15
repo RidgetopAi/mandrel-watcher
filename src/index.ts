@@ -7,7 +7,7 @@
  */
 
 import { Command } from 'commander';
-import { startCommand, stopCommand, statusCommand, configInitCommand } from './cli/commands';
+import { startCommand, stopCommand, statusCommand, configInitCommand, queueCommand, healthCommand } from './cli/commands';
 
 const program = new Command();
 
@@ -34,11 +34,36 @@ program
   .action(statusCommand);
 
 program
+  .command('health')
+  .description('Check API connectivity and watcher health')
+  .action(healthCommand);
+
+program
   .command('config')
   .description('Configuration management')
   .command('init')
   .description('Create default configuration file')
   .action(configInitCommand);
+
+// Queue management commands
+const queue = program
+  .command('queue')
+  .description('Manage retry queue');
+
+queue
+  .command('list')
+  .description('List items in the retry queue')
+  .action(() => queueCommand('list'));
+
+queue
+  .command('clear')
+  .description('Clear all items from the retry queue')
+  .action(() => queueCommand('clear'));
+
+queue
+  .command('retry')
+  .description('Process the retry queue now')
+  .action(() => queueCommand('retry'));
 
 // Parse CLI arguments
 program.parse();
