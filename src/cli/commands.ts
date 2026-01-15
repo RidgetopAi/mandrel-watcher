@@ -10,7 +10,7 @@ import { RetryQueue } from '../core/RetryQueue';
 import { logger } from '../utils/logger';
 
 // Active watchers for cleanup
-let activeWatchers: GitWatcher[] = [];
+let activeWatchers: Map<string, GitWatcher> = new Map(); // keyed by project path
 let isShuttingDown = false;
 let retryQueue: RetryQueue;
 let mandrelClient: MandrelClient;
@@ -18,6 +18,9 @@ let mandrelClient: MandrelClient;
 // Retry queue processing interval (60 seconds)
 const RETRY_INTERVAL_MS = 60000;
 let retryIntervalId: ReturnType<typeof setInterval> | null = null;
+
+// Project refresh interval (from config, default 5 minutes)
+let projectRefreshIntervalId: ReturnType<typeof setInterval> | null = null;
 
 /**
  * Start command - begin watching configured projects
@@ -38,9 +41,8 @@ export async function startCommand(options: { foreground?: boolean; debug?: bool
   const config = await configManager.load();
 
   if (config.projects.length === 0) {
-    logger.error('No projects configured. Edit config file:');
-    logger.error(`  ${configManager.getConfigPath()}`);
-    process.exit(1);
+    logger.warn('No projects found. Configure root_directory in Mandrel project settings.');
+    logger.info('Watcher will check for new projects periodically.');
   }
 
   // Write PID file
@@ -61,23 +63,28 @@ export async function startCommand(options: { foreground?: boolean; debug?: bool
     isShuttingDown = true;
 
     logger.info('Shutting down...');
-    
+
     // Stop retry interval
     if (retryIntervalId) {
       clearInterval(retryIntervalId);
     }
-    
-    for (const watcher of activeWatchers) {
+
+    // Stop project refresh interval
+    if (projectRefreshIntervalId) {
+      clearInterval(projectRefreshIntervalId);
+    }
+
+    for (const watcher of activeWatchers.values()) {
       await watcher.stop();
     }
-    
+
     await DaemonManager.removePid();
-    
+
     const queueStats = retryQueue.getStats();
     if (queueStats.pending > 0) {
       logger.info(`${queueStats.pending} items remain in retry queue (will resume on restart)`);
     }
-    
+
     process.exit(0);
   };
 
@@ -124,10 +131,13 @@ export async function startCommand(options: { foreground?: boolean; debug?: bool
     await retryQueue.processQueue((payload) => mandrelClient.pushStats(payload));
   };
 
-  // Start watchers for each project
-  logger.info(`Starting mandrel-watcher (PID ${process.pid})`);
-  
-  for (const project of config.projects) {
+  // Helper to start watching a project
+  const startWatcher = async (project: { path: string; mandrel_project: string }) => {
+    // Skip if already watching
+    if (activeWatchers.has(project.path)) {
+      return false;
+    }
+
     const watcher = new GitWatcher({
       projectPath: project.path,
       mandrelProject: project.mandrel_project,
@@ -137,26 +147,71 @@ export async function startCommand(options: { foreground?: boolean; debug?: bool
 
     try {
       await watcher.start();
-      activeWatchers.push(watcher);
+      activeWatchers.set(project.path, watcher);
+      return true;
     } catch (error) {
       logger.error(`Failed to start watcher for ${project.path}:`, error);
+      return false;
     }
+  };
+
+  // Start watchers for each project
+  logger.info(`Starting mandrel-watcher (PID ${process.pid})`);
+
+  for (const project of config.projects) {
+    await startWatcher(project);
   }
 
-  if (activeWatchers.length === 0) {
-    logger.error('No watchers started. Exiting.');
-    await DaemonManager.removePid();
-    process.exit(1);
-  }
+  // Refresh projects periodically to pick up new ones
+  const refreshProjects = async () => {
+    try {
+      const oldProjects = new Set(config.projects.map(p => p.path));
+      await configManager.fetchProjects();
+      const newConfig = configManager.get();
+
+      // Start watchers for any new projects
+      let added = 0;
+      for (const project of newConfig.projects) {
+        if (!oldProjects.has(project.path)) {
+          const started = await startWatcher(project);
+          if (started) {
+            added++;
+            logger.info(`Added new project: ${project.mandrel_project}`);
+          }
+        }
+      }
+
+      // Stop watchers for removed projects
+      const currentPaths = new Set(newConfig.projects.map(p => p.path));
+      for (const [path, watcher] of activeWatchers) {
+        if (!currentPaths.has(path)) {
+          await watcher.stop();
+          activeWatchers.delete(path);
+          logger.info(`Removed project: ${path}`);
+        }
+      }
+
+      if (added > 0) {
+        logger.info(`Now watching ${activeWatchers.size} project(s)`);
+      }
+    } catch (error) {
+      logger.warn('Failed to refresh projects:', error);
+    }
+  };
 
   // Process any queued items from previous runs
   await processRetryQueue();
-  
+
   // Start periodic retry processing
   retryIntervalId = setInterval(processRetryQueue, RETRY_INTERVAL_MS);
 
+  // Start periodic project refresh
+  const refreshIntervalMs = (config.project_refresh_interval || 300) * 1000;
+  projectRefreshIntervalId = setInterval(refreshProjects, refreshIntervalMs);
+
   const queueStats = retryQueue.getStats();
-  logger.info(`Watching ${activeWatchers.length} project(s)${queueStats.pending > 0 ? ` (${queueStats.pending} items in retry queue)` : ''}. Press Ctrl+C to stop.`);
+  logger.info(`Watching ${activeWatchers.size} project(s)${queueStats.pending > 0 ? ` (${queueStats.pending} items in retry queue)` : ''}. Press Ctrl+C to stop.`);
+  logger.info(`Projects will be refreshed every ${config.project_refresh_interval || 300} seconds`);
 
   // Keep process alive
   if (!options.foreground) {
@@ -197,8 +252,9 @@ export async function statusCommand(): Promise<void> {
   try {
     const config = await configManager.load();
     console.log(`\n  API URL: ${config.api_url}`);
-    console.log(`  Projects: ${config.projects.length}`);
-    
+    console.log(`  Projects: ${config.projects.length} (from Mandrel API)`);
+    console.log(`  Refresh interval: ${config.project_refresh_interval || 300}s`);
+
     for (const project of config.projects) {
       console.log(`    - ${project.mandrel_project}: ${project.path}`);
     }
