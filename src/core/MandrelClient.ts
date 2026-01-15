@@ -33,6 +33,14 @@ export interface ActiveSession {
   project_name?: string;
 }
 
+export interface CachedSession extends ActiveSession {
+  fetchedAt: number;
+}
+
+export interface SessionCacheConfig {
+  refreshIntervalMs: number; // How often to refresh session (default: 30s)
+}
+
 export interface RetryConfig {
   maxRetries: number;
   baseDelayMs: number;
@@ -49,6 +57,10 @@ const DEFAULT_RETRY_CONFIG: RetryConfig = {
 
 export type ConnectionState = 'connected' | 'disconnected' | 'connecting';
 
+const DEFAULT_SESSION_CACHE_CONFIG: SessionCacheConfig = {
+  refreshIntervalMs: 30000, // 30 seconds
+};
+
 export class MandrelClient {
   private baseUrl: string;
   private authToken?: string;
@@ -57,10 +69,20 @@ export class MandrelClient {
   private lastSuccessfulRequest: Date | null = null;
   private consecutiveFailures: number = 0;
 
-  constructor(baseUrl: string, authToken?: string, retryConfig?: Partial<RetryConfig>) {
+  // Session cache per project
+  private sessionCache: Map<string, CachedSession> = new Map();
+  private sessionCacheConfig: SessionCacheConfig;
+
+  constructor(
+    baseUrl: string,
+    authToken?: string,
+    retryConfig?: Partial<RetryConfig>,
+    sessionCacheConfig?: Partial<SessionCacheConfig>
+  ) {
     this.baseUrl = baseUrl.replace(/\/$/, '');
     this.authToken = authToken;
     this.retryConfig = { ...DEFAULT_RETRY_CONFIG, ...retryConfig };
+    this.sessionCacheConfig = { ...DEFAULT_SESSION_CACHE_CONFIG, ...sessionCacheConfig };
   }
 
   private getHeaders(): Record<string, string> {
@@ -185,14 +207,65 @@ export class MandrelClient {
   }
 
   /**
-   * Get the currently active session
+   * Check if cached session is still valid (not expired)
    */
-  async getActiveSession(): Promise<ActiveSession | null> {
+  private isCacheValid(cached: CachedSession): boolean {
+    const age = Date.now() - cached.fetchedAt;
+    return age < this.sessionCacheConfig.refreshIntervalMs;
+  }
+
+  /**
+   * Get session for a project (with caching)
+   * Uses cached session if still valid, otherwise fetches fresh
+   */
+  async getSessionForProject(projectName: string): Promise<ActiveSession | null> {
+    // Check cache first
+    const cached = this.sessionCache.get(projectName);
+    if (cached && this.isCacheValid(cached)) {
+      logger.debug(`Using cached session for ${projectName} (age: ${Math.round((Date.now() - cached.fetchedAt) / 1000)}s)`);
+      return cached;
+    }
+
+    // Fetch fresh session
+    const session = await this.fetchActiveSession(projectName);
+    
+    if (session) {
+      // Cache it
+      const cachedSession: CachedSession = {
+        ...session,
+        fetchedAt: Date.now(),
+      };
+      this.sessionCache.set(projectName, cachedSession);
+      logger.debug(`Cached new session for ${projectName}: ${session.session_id.substring(0, 8)}...`);
+    } else {
+      // Clear stale cache if no active session
+      this.sessionCache.delete(projectName);
+    }
+
+    return session;
+  }
+
+  /**
+   * Force refresh session for a project (bypass cache)
+   */
+  async refreshSession(projectName: string): Promise<ActiveSession | null> {
+    this.sessionCache.delete(projectName);
+    return this.getSessionForProject(projectName);
+  }
+
+  /**
+   * Get the currently active session (raw API call)
+   */
+  private async fetchActiveSession(projectName?: string): Promise<ActiveSession | null> {
+    const url = projectName 
+      ? `${this.baseUrl}/api/sessions/current?project=${encodeURIComponent(projectName)}`
+      : `${this.baseUrl}/api/sessions/current`;
+
     const result = await this.fetchWithRetry<{
       success: boolean;
       data?: { session?: { id: string; project_id: string; project_name?: string } };
     }>(
-      `${this.baseUrl}/api/sessions/current`,
+      url,
       { method: 'GET', headers: this.getHeaders() },
       'GetActiveSession'
     );
@@ -210,6 +283,33 @@ export class MandrelClient {
       project_id: session.project_id,
       project_name: session.project_name,
     };
+  }
+
+  /**
+   * Get the currently active session (legacy - no project filter)
+   * @deprecated Use getSessionForProject instead
+   */
+  async getActiveSession(): Promise<ActiveSession | null> {
+    return this.fetchActiveSession();
+  }
+
+  /**
+   * Clear all cached sessions
+   */
+  clearSessionCache(): void {
+    this.sessionCache.clear();
+    logger.debug('Session cache cleared');
+  }
+
+  /**
+   * Get cache stats for debugging
+   */
+  getSessionCacheStats(): { size: number; entries: Array<{ project: string; age: number }> } {
+    const entries = Array.from(this.sessionCache.entries()).map(([project, cached]) => ({
+      project,
+      age: Math.round((Date.now() - cached.fetchedAt) / 1000),
+    }));
+    return { size: this.sessionCache.size, entries };
   }
 
   /**

@@ -48,7 +48,12 @@ export async function startCommand(options: { foreground?: boolean; debug?: bool
 
   // Initialize retry queue and Mandrel client
   retryQueue = new RetryQueue();
-  mandrelClient = new MandrelClient(config.api_url, config.auth_token);
+  mandrelClient = new MandrelClient(
+    config.api_url, 
+    config.auth_token,
+    undefined, // default retry config
+    { refreshIntervalMs: (config.session_poll_interval || 30) * 1000 }
+  );
 
   // Setup signal handlers for graceful shutdown
   const shutdown = async () => {
@@ -91,8 +96,8 @@ export async function startCommand(options: { foreground?: boolean; debug?: bool
 
   // Commit handler - called when new commits are detected
   const handleCommits = async (commits: CommitData[], projectPath: string, mandrelProject: string) => {
-    // Try to get active session
-    const session = await mandrelClient.getActiveSession();
+    // Get session for this specific project (uses cache)
+    const session = await mandrelClient.getSessionForProject(mandrelProject);
 
     await pushWithRetry({
       project_name: mandrelProject,
