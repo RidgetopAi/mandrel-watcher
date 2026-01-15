@@ -7,15 +7,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/mandrel-watcher start -f
-ExecStop=/usr/local/bin/mandrel-watcher stop
 Restart=on-failure
 RestartSec=10
-
-# Run as user (not root)
-User=%i
-
-# Environment
-Environment=HOME=/home/%i
 
 # Logging
 StandardOutput=journal
