@@ -1,0 +1,31 @@
+{
+  "name": "mandrel-watcher",
+  "version": "0.1.0",
+  "description": "Watch git repositories and sync commits to Mandrel",
+  "module": "src/index.ts",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "mandrel-watcher": "./src/index.ts"
+  },
+  "scripts": {
+    "start": "bun run src/index.ts start",
+    "dev": "bun run src/index.ts start -f -d",
+    "build": "bun build --compile src/index.ts --outfile dist/mandrel-watcher",
+    "build:linux": "bun build --compile --target=bun-linux-x64 src/index.ts --outfile dist/mandrel-watcher-linux",
+    "build:mac": "bun build --compile --target=bun-darwin-arm64 src/index.ts --outfile dist/mandrel-watcher-darwin",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@iarna/toml": "^2.2.5",
+    "chokidar": "^5.0.0",
+    "commander": "^14.0.2",
+    "simple-git": "^3.30.0"
+  }
+}
