@@ -7,7 +7,7 @@ import { logger } from '../utils/logger';
 export interface CommitFile {
   path: string;
   lines_added: number;
-  lines_deleted: number;
+  lines_removed: number;
   change_type: 'added' | 'modified' | 'deleted' | 'renamed';
 }
 

@@ -164,7 +164,7 @@ export class GitWatcher {
         files.push({
           path: file.file,
           lines_added: (file as any).insertions || 0,
-          lines_deleted: (file as any).deletions || 0,
+          lines_removed: (file as any).deletions || 0,
           change_type: changeType,
         });
       }
